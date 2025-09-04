@@ -1,4 +1,4 @@
-/* USER CODE BEGIN Header */
+    /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -19,7 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "tim.h"
-#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -36,7 +35,12 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define ECHO_Pin GPIO_PIN_0
+#define ECHO_GPIO_Port GPIOA
+#define TRIG_Pin GPIO_PIN_1
+#define TRIG_GPIO_Port GPIOA
+#define PB0_Pin GPIO_PIN_0
+#define PB0_GPIO_Port GPIOB
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,7 +51,11 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+uint32_t IC_Val1 = 0; // 發射時間點
+uint32_t IC_Val2 = 0; // 接收時間點
+uint32_t Difference = 0;  // 發射接收時間差 ( IC_Val2 - IC_Val1 )
+uint8_t Is_First_Captured = 0;  //標記訊號上升下降狀態
+float Distance = 0.0;         // 物距 ( 時差Difference * 聲速 )
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -58,17 +66,7 @@ void pwm_motor_control(int dutyA, int dutyB) {
     __HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_1, dutyA);  // 控制 enableA
     __HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_2, dutyB);  // 控制 enableB
 }
-#ifdef __GNUC__
-#define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
-#else
-#define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
-#endif  /* __GNUC__ */
 
-PUTCHAR_PROTOTYPE {
-    uint8_t temp = (uint8_t)ch;
-    HAL_UART_Transmit(&huart1, &temp, 1, HAL_MAX_DELAY);
-    return ch;
-}
 void move_forward() {
     // 設定馬達正轉
     HAL_GPIO_WritePin(GPIOC, GPIO_PIN_9, GPIO_PIN_SET);  // IN1 方向設定
@@ -113,16 +111,45 @@ void stop_motor() {
 }
 
 void control(int distance) {
-    if (distance < 20) {  // 假設距離小於 20 cm 時需要避開障礙物
+    if (Distance > 0 && Distance < 20) {  // 假設距離小於 20 cm 時需要避開障礙物
         stop_motor();   // 停止前進
         HAL_Delay(500); // 等待一段時間
         turn_left();    // 左轉
         HAL_Delay(1000); // 轉向後停留一段時間
+        turn_right();
+        HAL_Delay(1000)
         move_forward(); // 重新前進
     }
     else
     	move_forward();
 }
+void delay_us(uint16_t TRIGGER_t) {  //因為函式庫內 delay() 單位為毫秒ms，因此需自定義微秒延遲器
+    __HAL_TIM_SET_COUNTER(&htim4, 0);  // 設定計數器歸零
+    while (__HAL_TIM_GET_COUNTER(&htim4) < TRIGGER_t ); // while持續進行直到計數器 = TRIGGER_t
+}
+    // 發送 Trig 信號 ( 長度為10微渺的高電位 )
+    void HCSR04_Trigger() {
+        HAL_GPIO_WritePin(TRIG_GPIO_Port, TRIG_Pin, GPIO_PIN_SET);  // 高電位
+        delay_us(10);  // 保持 10us
+        HAL_GPIO_WritePin(TRIG_GPIO_Port, TRIG_Pin, GPIO_PIN_RESET);  // 低電位
+    }
+    // 接收 Echo 信號
+    void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim) {
+    	if (htim->Instance == TIM2 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1){
+            if (Is_First_Captured == 0) {  // 第一次捕獲上升沿
+            	// 這次中斷是 TIM2_CH1 觸發的，執行距離計算
+                IC_Val1 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+                Is_First_Captured = 1;
+                __HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_1, TIM_INPUTCHANNELPOLARITY_FALLING);
+            } else {  // 第二次捕獲下降沿
+                IC_Val2 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+                Difference = IC_Val2 - IC_Val1;
+                Distance = (Difference * 0.0343) / 2;
+                Is_First_Captured = 0;
+                __HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_1, TIM_INPUTCHANNELPOLARITY_RISING);
+            }
+        }
+    }
 
 /*void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)//定时器中断函数
 {
@@ -147,6 +174,7 @@ void control(int distance) {
   */
 int main(void)
 {
+
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -172,15 +200,11 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_TIM2_Init();
-  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  if (HAL_UART_Init(&huart1) != HAL_OK) {
-      Error_Handler();  // 進入錯誤處理模式
-  }
-  	  HAL_TIM_Base_Start_IT(&htim3);
-    HAL_TIM_Base_Start_IT(&htim4);
-    char msg[] = "UART Test\r\n";
-    HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+  	HAL_TIM_Base_Start(&htim4);
+  	HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
+  	HAL_TIM_Base_Start_IT(&htim3);
+//HAL_TIM_Base_Start_IT(&htim4);
 
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
@@ -193,12 +217,9 @@ int main(void)
   while (1)
   {
 
-	  	  	  Hcsr04Start();
+	  	  	  HCSR04_Trigger();
 	          HAL_Delay(100);
-	          int distance = (int)Hcsr04Read();
-	          printf("distance: %d cm\r\n", distance);
-	          control(distance);
-	          HAL_Delay(200);
+	          control(Distance);
 
     /* USER CODE END WHILE */
 
